@@ -1,0 +1,9 @@
+
+# requirements.txt
+
+# This project currently uses only the Python standard library.
+# All dependencies are part of the built-in Python distribution.
+# When integrating an LLM provider (e.g., OpenAI) or Pinecone, add
+# the corresponding packages here, for example:
+google-generativeai
+pinecone-client>=2.0.0
