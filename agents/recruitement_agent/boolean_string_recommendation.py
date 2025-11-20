@@ -1,20 +1,12 @@
-"""
-Role Refinement & Boolean Search Builder
-Final Version: Deterministic, Stable, Compact Prompt, Pydantic v1, google-generativeai
-"""
-
+import re
 import json
 from typing import List, Literal
 from pydantic import BaseModel
 from dotenv import load_dotenv
 import google.generativeai as genai
 
-# Load environment
 load_dotenv()
-
-# Auto-configure Gemini using GEMINI_API_KEY from environment
 genai.configure()
-
 
 # -----------------------
 # Pydantic Models
@@ -43,110 +35,223 @@ class RoleRefinementOutput(BaseModel):
 
 
 # -----------------------
-# SYSTEM PROMPT
+# System Prompt
 # -----------------------
 
 SYSTEM_PROMPT = """
-            You are a recruitment sourcing assistant.
+                You are a recruitment sourcing assistant.
 
-            Your workflow must ALWAYS follow these stages:
+                Your job:
+                - Refine ambiguous job roles
+                - Infer seniority and domain
+                - Generate core skills (strict or generative)
+                - Produce deterministic Boolean search strings
+                - Output JSON only (no explanations)
 
-            Stage 1 — Extract meaning from user input:
-            - seniority_level (Junior, Mid, Senior, Lead, Principal)
-            - role_family (Data Science, Software Engineering, ML Engineer, Analytics, etc.)
-            - location
-            - must_have_skills mentioned directly
-            - nice_to_have mentioned directly
-            - domain_focus (only if explicitly mentioned)
+                ====================================================
+                1. INPUT VALIDATION
+                ====================================================
+                Validate the user input for:
+                - role/title (mandatory)
+                - location (optional)
+                - seniority (optional)
+                - skills (optional)
 
-            Stage 2 — Apply seniority logic:
-            Junior → fundamentals only, no deep specialization  
-            Mid → solid technical skills, moderate depth  
-            Senior → advanced specialization, system-level depth  
-            Lead/Principal → architecture, leadership, cross-functional impact  
+                If role/title is missing → 
+                {
+                "status": "needs_clarification",
+                "missing_info": ["role/title"],
+                "refined_role": null,
+                "boolean_search": null,
+                "notes": "Role/title is required."
+                }
 
-            Stage 3 — Generate:
-            - related_titles appropriate to the SAME seniority and SAME role_family
-            - core_skills appropriate to the seniority and role
-            - nice_to_have appropriate to the seniority and role
+                ====================================================
+                2. SKILL ENGINE (Hybrid Logic)
+                ====================================================
 
-            Stage 4 — Boolean creation rules:
-            - Use ONLY related_titles + core_skills
-            - Boolean must be deterministic (same input = same output)
-            - Format: ("Title1" OR "Title2") AND (Skill1 OR Skill2) AND (Location)
-            - No prefixes like TITLE:, SKILLS:, LOCATION:
-            - No composite skills ("TensorFlow OR PyTorch")
-            - No duplicates
-            - Alphabetically sorted
+                CASE A — User provides skills:
+                    STRICT MODE:
+                    - Use ONLY the provided skills
+                    - Do NOT generate extra skills
+                    - Clean, normalize, deduplicate
 
-            Stage 5 — Output JSON only:
-            {
-            "status": "ok | needs_clarification",
-            "missing_info": [],
-            "refined_role": {
-                "main_title": "",
-                "related_titles": [],
-                "core_skills": [],
-                "nice_to_have": [],
-                "seniority_level": "",
-                "industry_focus": ""
-            },
-            "boolean_search": {
-                "linkedin": "",
-                "job_boards": ""
-            },
-            "notes": ""
-            }
+                CASE B — User provides NO skills:
+                    GENERATIVE MODE:
+                    - Add Universal Skills (Layer 1)
+                    - Detect role_family via reasoning
+                    - Add role_family default skills (Layer 2)
+                    - Detect domain/industry from user input
+                        → Add domain-specific skills (Layer 3)
+                    - Prioritize 5–7 core skills total
+                    - Sort alphabetically
+                    - Ensure skills align with seniority & location context
 
-            Return JSON only.
+                Universal skills (for junior/mid):
+                ["Communication", "Collaboration", "Problem Solving", "Documentation", "Time Management"]
+
+                For senior roles:
+                - Focus more on leadership, system-level skills, architecture, stakeholder mgmt.
+                - Reduce generic soft skills unless critical.
+
+                ====================================================
+                3. SENIORITY INFERENCE
+                ====================================================
+                Infer seniority using patterns:
+
+                Junior:
+                - “intern”, “entry”, “junior”, “0-1 years”
+
+                Mid:
+                - “mid-level”, “2–5 years”
+
+                Senior:
+                - “senior”, “lead”, “principal”, “manager”, 
+                “5+ years”, “7+ years”, “director”, “head”, “chief”
+
+                If unclear → default to **mid-level**.
+
+                ====================================================
+                4. ROLE REFINEMENT
+                ====================================================
+                Produce:
+
+                - main_title  
+                    → Clean, standardized title (e.g., "HR Manager", "Senior Software Engineer")
+
+                - related_titles  
+                    → 3–6 titles from the same role_family  
+                    (Must be realistic and non-hallucinated)
+
+                - core_skills  
+                    → 5–7 skills (strict if user-provided, generative if not)
+
+                - nice_to_have  
+                    → 3–5 supplementary skills tailored to:
+                        • role_family  
+                        • seniority  
+                        • domain  
+                        • location (if relevant)  
+
+                Rules:
+                - nice_to_have ≠ core_skills
+                - senior roles → prioritize strategic & leadership-oriented nice_to_have
+
+                ====================================================
+                5. BOOLEAN GENERATION (Deterministic & Safe)
+                ====================================================
+
+                LinkedIn Boolean:
+                - ("main_title" OR related_titles…)
+                - AND (location if supplied)
+                - AND (core skills)
+                - Use quotes properly
+                - Avoid hallucinated titles
+
+                Job Board Boolean:
+                - ("main_title" OR related_titles…)
+                - AND (location if present)
+                - AND (seniority keywords)
+                - AND (core skills)
+                - NOT (Assistant OR Coordinator OR Intern)
+
+                Rules:
+                - All parentheses balanced
+                - No missing quotes
+                - No nice_to_have in core skills
+                - Must be job-board friendly (no special characters)
+
+                ====================================================
+                6. OUTPUT RULES
+                ====================================================
+
+                Return JSON ONLY in this exact format:
+
+                {
+                "status": "ok",
+                "missing_info": [],
+                "refined_role": {
+                    "main_title": "",
+                    "related_titles": [],
+                    "core_skills": [],
+                    "nice_to_have": [],
+                    "seniority_level": "",
+                    "industry_focus": ""
+                },
+                "boolean_search": {
+                    "linkedin": "",
+                    "job_boards": ""
+                },
+                "notes": ""
+                }
+
+                NOTES:
+                - “industry_focus” must be inferred only if user mentions it (e.g., tech, finance, healthcare)
+                - If user input is unclear → add a short clarification request in “notes”
+
 """
 
 
 # -----------------------
-# Stabilizer (Ensures Deterministic Output)
+# Utility
 # -----------------------
 
 def stabilize(values):
-    """Remove duplicates, sort alphabetically, ensure deterministic output."""
     if not isinstance(values, list):
         return values
     return sorted(set(values), key=str.lower)
 
+def clean_boolean_string(s):
+    if not isinstance(s, str):
+        return ""
+    return s.replace("\\", "").strip()
+
 
 # -----------------------
-# Main Function
+# MAIN FUNCTION (Final)
 # -----------------------
 
 def run_role_refinement(user_input: str) -> RoleRefinementOutput:
-
     model = genai.GenerativeModel("gemini-2.5-flash")
 
-    response = model.generate_content(
-        SYSTEM_PROMPT + "\nUser Input: " + user_input
-    )
+    # Build stable prompt
+    final_prompt = f"{SYSTEM_PROMPT}\n\n### USER INPUT:\n{user_input}\n### END"
 
-    text = response.text.strip()
+    response = model.generate_content(final_prompt)
+    raw = response.text.strip()
 
-    # Extract JSON safely
+    # Safe JSON extraction
     try:
-        data = json.loads(text)
+        data = json.loads(raw)
     except:
-        start = text.find("{")
-        end = text.rfind("}")
-        data = json.loads(text[start:end + 1])
+        import re
+        json_match = re.search(r"\{(?:[^{}]|(?:\{[^{}]*\}))*\}", raw, re.DOTALL)
+        if not json_match:
+            raise ValueError("AI output did not contain valid JSON.")
+        data = json.loads(json_match.group(0))
 
-    # Stabilize lists for determinism
-    data["refined_role"]["related_titles"] = stabilize(data["refined_role"]["related_titles"])
-    data["refined_role"]["core_skills"] = stabilize(data["refined_role"]["core_skills"])
-    data["refined_role"]["nice_to_have"] = stabilize(data["refined_role"]["nice_to_have"])
+    # Sort lists deterministically
+    rr = data.get("refined_role", {})
+    rr["related_titles"] = stabilize(rr.get("related_titles", []))
+    rr["core_skills"] = stabilize(rr.get("core_skills", []))
+    rr["nice_to_have"] = stabilize(rr.get("nice_to_have", []))
 
+    # Standardize industry focus
+    rr["industry_focus"] = rr.get("industry_focus", "").title() or "General"
+
+    # Clean Boolean strings
+    b = data.get("boolean_search", {})
+    b["linkedin"] = clean_boolean_string(b.get("linkedin", ""))
+    b["job_boards"] = clean_boolean_string(b.get("job_boards", ""))
+
+    # Return validated output
     return RoleRefinementOutput(**data)
 
 
 # -----------------------
-# Manual Test
+# TEST
 # -----------------------
 
 if __name__ == "__main__":
-    result = run_role_refinement("jr. Data Scientist — Melbourne, Python, NLP")
+    result = run_role_refinement("Software Engineer — New York")
     print(json.dumps(result.dict(), indent=2))
